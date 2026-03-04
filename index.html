@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Color Clock Synth Ultimate</title>
+<style>
+body{
+    margin:0;
+    font-family:sans-serif;
+    background:#111;
+    color:white;
+    text-align:center;
+}
+
+/* ===== レイアウト ===== */
+.container{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+}
+
+canvas{
+    background:#000;
+    border-radius:50%;
+    margin:20px;
+    box-shadow:0 0 30px rgba(255,255,255,0.1);
+}
+
+button,select,input{
+    padding:8px;
+    margin:5px;
+}
+
+/* ===== マトリクス ===== */
+.matrix{
+    display:grid;
+    grid-template-columns:60px repeat(3,80px);
+    margin-top:20px;
+}
+
+.cell{
+    border:1px solid #222;
+    padding:6px;
+}
+
+.header{
+    background:#333;
+    font-weight:bold;
+}
+
+.active{
+    font-weight:bold;
+    color:white;
+}
+
+/* ===== 音階カラー ===== */
+.note-0{background:#ff0000;}   /* ド */
+.note-1{background:#ff3300;}
+.note-2{background:#ff9900;}
+.note-3{background:#ffff00;}
+.note-4{background:#99cc33;}
+.note-5{background:#00aa55;}
+.note-6{background:#00ccaa;}
+.note-7{background:#0066cc;}
+.note-8{background:#000099;}
+.note-9{background:#660099;}
+.note-10{background:#9933cc;}
+.note-11{background:#ffffff;color:#000;}
+
+.h-color{ box-shadow:0 0 10px red; }
+.m-color{ box-shadow:0 0 10px cyan; }
+.s-color{ box-shadow:0 0 10px lime; }
+
+</style>
+</head>
+<body>
+
+<div class="container">
+
+<h1>Color Clock Synth</h1>
+
+<canvas id="clockCanvas" width="300" height="300"></canvas>
+<div id="clock"></div>
+
+<div>
+<select id="waveType">
+<option value="sine">sine</option>
+<option value="square">square</option>
+<option value="sawtooth">sawtooth</option>
+<option value="triangle">triangle</option>
+</select>
+
+Room
+<input type="range" id="roomSize" min="0.1" max="5" step="0.1" value="2">
+Mix
+<input type="range" id="reverbMix" min="0" max="1" step="0.01" value="0.4">
+
+<button onclick="startApp()">START</button>
+<button onclick="stopApp()">STOP</button>
+<button onclick="goUpload()">音源アップロード</button>
+</div>
+
+<div id="matrix" class="matrix"></div>
+
+</div>
+
+<script>
+
+/* ========= 既存音響エンジン ========= */
+
+let audioContext;
+let masterGain,dryGain,wetGain,convolver;
+let running=false;
+
+const noteNames=["ド","ド#","レ","レ#","ミ","ファ","ファ#","ソ","ソ#","ラ","ラ#","シ"];
+const baseFreq=261.63;
+let uploadedBuffers=new Array(12).fill(null);
+
+let hourNode=null;
+let currentHourIndex=null;
+
+function initAudio(){
+if(!audioContext){
+audioContext=new (window.AudioContext||window.webkitAudioContext)();
+
+masterGain=audioContext.createGain();
+dryGain=audioContext.createGain();
+wetGain=audioContext.createGain();
+convolver=audioContext.createConvolver();
+
+masterGain.connect(dryGain);
+masterGain.connect(convolver);
+convolver.connect(wetGain);
+dryGain.connect(audioContext.destination);
+wetGain.connect(audioContext.destination);
+
+updateReverb();
+}
+}
+
+function createImpulseResponse(duration){
+const rate=audioContext.sampleRate;
+const length=rate*duration;
+const impulse=audioContext.createBuffer(2,length,rate);
+for(let ch=0;ch<2;ch++){
+const channel=impulse.getChannelData(ch);
+for(let i=0;i<length;i++){
+channel[i]=(Math.random()*2-1)*Math.pow(1-i/length,2);
+}
+}
+return impulse;
+}
+
+function updateReverb(){
+const room=parseFloat(document.getElementById("roomSize").value);
+const mix=parseFloat(document.getElementById("reverbMix").value);
+convolver.buffer=createImpulseResponse(room);
+wetGain.gain.value=mix;
+dryGain.gain.value=1-mix;
+}
+
+document.getElementById("roomSize").oninput=updateReverb;
+document.getElementById("reverbMix").oninput=updateReverb;
+
+function getFreq(i){return baseFreq*Math.pow(2,i/12);}
+
+function playContinuousHour(index){
+if(hourNode){hourNode.stop();hourNode=null;}
+if(uploadedBuffers[index]){
+const src=audioContext.createBufferSource();
+src.buffer=uploadedBuffers[index];
+src.loop=true;
+src.connect(masterGain);
+src.start();
+hourNode=src;
+}else{
+const osc=audioContext.createOscillator();
+const gain=audioContext.createGain();
+osc.type=document.getElementById("waveType").value;
+osc.frequency.value=getFreq(index);
+gain.gain.value=0.15;
+osc.connect(gain);
+gain.connect(masterGain);
+osc.start();
+hourNode=osc;
+}
+}
+
+function playOneShot(index,duration){
+if(uploadedBuffers[index]){
+const src=audioContext.createBufferSource();
+src.buffer=uploadedBuffers[index];
+src.connect(masterGain);
+src.start();
+src.stop(audioContext.currentTime+duration);
+}else{
+const osc=audioContext.createOscillator();
+const gain=audioContext.createGain();
+osc.type=document.getElementById("waveType").value;
+osc.frequency.value=getFreq(index);
+gain.gain.setValueAtTime(0.001,audioContext.currentTime);
+gain.gain.exponentialRampToValueAtTime(0.25,audioContext.currentTime+0.01);
+gain.gain.exponentialRampToValueAtTime(0.001,audioContext.currentTime+duration);
+osc.connect(gain);
+gain.connect(masterGain);
+osc.start();
+osc.stop(audioContext.currentTime+duration);
+}
+}
+
+function hourIndex(h){return h%12;}
+function minuteIndex(m){return Math.floor(m/5);}
+function secondIndex(s){return Math.floor(s/5);}
+
+/* ========= アナログ時計 ========= */
+
+const canvas=document.getElementById("clockCanvas");
+const ctx=canvas.getContext("2d");
+
+function drawClock(date){
+const w=canvas.width;
+const r=w/2;
+ctx.clearRect(0,0,w,w);
+ctx.save();
+ctx.translate(r,r);
+
+ctx.beginPath();
+ctx.arc(0,0,r-5,0,Math.PI*2);
+ctx.fillStyle="#000";
+ctx.fill();
+
+const h=date.getHours()%12;
+const m=date.getMinutes();
+const s=date.getSeconds();
+
+drawHand((h+m/60)*30,r*0.5,6,"#ff4d4d");
+drawHand((m+s/60)*6,r*0.7,4,"#4da6ff");
+drawHand(s*6,r*0.85,2,"#00ffaa");
+
+ctx.restore();
+}
+
+function drawHand(angle,length,width,color){
+ctx.save();
+ctx.rotate(angle*Math.PI/180);
+ctx.beginPath();
+ctx.moveTo(0,0);
+ctx.lineTo(0,-length);
+ctx.lineWidth=width;
+ctx.strokeStyle=color;
+ctx.stroke();
+ctx.restore();
+}
+
+/* ========= マトリクス ========= */
+
+function createMatrix(){
+const matrix=document.getElementById("matrix");
+matrix.innerHTML="";
+matrix.appendChild(makeCell(""));
+["H","M","S"].forEach(t=>matrix.appendChild(makeCell(t,"header")));
+for(let i=11;i>=0;i--){
+matrix.appendChild(makeCell(noteNames[i]));
+for(let j=0;j<3;j++){
+matrix.appendChild(makeCell("","note-"+i,`cell-${i}-${j}`));
+}
+}
+}
+
+function makeCell(text,cls="",id=""){
+const d=document.createElement("div");
+d.className="cell "+cls;
+d.innerText=text;
+if(id)d.id=id;
+return d;
+}
+
+/* ========= メインループ ========= */
+
+function tick(){
+if(!running)return;
+
+const now=new Date();
+document.getElementById("clock").innerText=now.toLocaleTimeString();
+
+drawClock(now);
+
+const h=hourIndex(now.getHours());
+const m=minuteIndex(now.getMinutes());
+const s=secondIndex(now.getSeconds());
+const ms=now.getMilliseconds();
+
+if(currentHourIndex!==h){
+currentHourIndex=h;
+playContinuousHour(h);
+}
+
+if(ms>500&&ms<520){playOneShot(m,0.5);}
+if(ms<20){playOneShot(s,0.25);}
+
+for(let i=0;i<12;i++){
+for(let j=0;j<3;j++){
+const cell=document.getElementById(`cell-${i}-${j}`);
+cell.classList.remove("h-color","m-color","s-color","active");
+}
+}
+
+document.getElementById(`cell-${h}-0`).classList.add("h-color","active");
+document.getElementById(`cell-${m}-1`).classList.add("m-color","active");
+document.getElementById(`cell-${s}-2`).classList.add("s-color","active");
+
+requestAnimationFrame(tick);
+}
+
+function startApp(){initAudio();running=true;tick();}
+function stopApp(){running=false;if(hourNode){hourNode.stop();hourNode=null;}}
+
+createMatrix();
+
+</script>
+</body>
+</html>
